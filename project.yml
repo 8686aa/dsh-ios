@@ -1,4 +1,4 @@
-name: DSHPhone
+﻿name: DSHPhone
 options:
   bundleIdPrefix: com.dsh.phone
   createIntermediateGroups: true
@@ -13,6 +13,7 @@ settings:
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_BITCODE: NO
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
     DEVELOPMENT_TEAM: ""
     CODE_SIGNING_ALLOWED: NO
     CODE_SIGNING_REQUIRED: NO
@@ -22,7 +23,7 @@ targets:
   DSHPhone:
     type: application
     platform: iOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "16.0"
     sources:
       - path: DSHPhone
         excludes:
@@ -54,7 +55,7 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSLocalNetworkUsageDescription: "用于在同一個 Wi-Fi 下发现并连接你电脑上的 dsh 网关。"
+        NSLocalNetworkUsageDescription: "鐢ㄤ簬鍦ㄥ悓涓€鍊?Wi-Fi 涓嬪彂鐜板苟杩炴帴浣犵數鑴戜笂鐨?dsh 缃戝叧銆?
         NSBonjourServices:
           - "_dsh._tcp"
           - "_dsh._tcp."
@@ -62,3 +63,4 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
+
