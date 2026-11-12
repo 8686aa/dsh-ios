@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
 import { startMdns } from './mdns-announce.mjs';
+import { listSessions, readMessages, ask } from './native-api.mjs';
 
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
 
@@ -127,6 +128,85 @@ p{color:#9a9aa2;font-size:13px}code{background:#26262b;padding:2px 6px;border-ra
 <form method="get" action="/"><input name="k" placeholder="access key" autofocus autocapitalize="off" autocorrect="off"><button>进入</button></form>
 <p>网络已通（能看到这个框就说明手机和电脑在同一个局域网）。首次请用带 key 的链接，或手输密钥。</p>`;
 
+const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
+
+/**
+ * Plain-JSON surface for the iOS app.
+ *   GET  /native/ping
+ *   GET  /native/sessions
+ *   GET  /native/session/<id>/messages
+ *   POST /native/ask {sessionId?, text}  -> NDJSON run events
+ */
+async function handleNative(req, res, u) {
+  const p = u.pathname;
+
+  if (p === '/native/ping') {
+    res.writeHead(200, JSON_HEADERS);
+    res.end(JSON.stringify({ ok: true, service: 'dsh-phone-gateway', name: os.hostname(), native: true }));
+    return;
+  }
+
+  if (p === '/native/sessions') {
+    let sessions = [];
+    try { sessions = listSessions(DSH_HOME); } catch (e) { log('native sessions error', e.message); }
+    res.writeHead(200, JSON_HEADERS);
+    res.end(JSON.stringify({ sessions }));
+    return;
+  }
+
+  const m = p.match(/^\/native\/session\/([^/]+)\/messages$/);
+  if (m) {
+    let data = null;
+    try { data = readMessages(DSH_HOME, decodeURIComponent(m[1])); } catch (e) { log('native messages error', e.message); }
+    if (!data) {
+      res.writeHead(404, JSON_HEADERS);
+      res.end(JSON.stringify({ error: 'session not found' }));
+      return;
+    }
+    res.writeHead(200, JSON_HEADERS);
+    res.end(JSON.stringify(data));
+    return;
+  }
+
+  if (p === '/native/ask' && req.method === 'POST') {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    let payload = {};
+    try { payload = JSON.parse(body || '{}'); } catch {
+      res.writeHead(400, JSON_HEADERS);
+      res.end(JSON.stringify({ error: 'invalid json' }));
+      return;
+    }
+    const text = String(payload.text || '').trim();
+    if (!text) {
+      res.writeHead(400, JSON_HEADERS);
+      res.end(JSON.stringify({ error: 'empty text' }));
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-accel-buffering': 'no',
+    });
+    const send = (o) => { try { res.write(JSON.stringify(o) + '\n'); } catch { } };
+    send({ type: 'accepted', at: Date.now() });
+    log('native ask', (payload.sessionId || 'new'), JSON.stringify(text.slice(0, 60)));
+    ask({
+      dshHome: DSH_HOME,
+      dshBin: DSH_BIN,
+      nodeBin: process.execPath,
+      sessionId: payload.sessionId || undefined,
+      text,
+      onEvent: send,
+      onEnd: (info) => { send({ type: 'done', ...info }); try { res.end(); } catch { } },
+    });
+    return;
+  }
+
+  res.writeHead(404, JSON_HEADERS);
+  res.end(JSON.stringify({ error: 'unknown native route' }));
+}
+
 function createGateway(backendCookie) {
   const server = http.createServer((req, res) => {
     let u;
@@ -144,8 +224,9 @@ function createGateway(backendCookie) {
         const body = {
           service: 'dsh-phone-gateway',
           name: os.hostname(),
-          version: '1',
+          version: '2',
           os: 'windows',
+          native: true,
           ports: PORTS,
           key: process.env.DSH_PING_HIDE_KEY === '1' ? '' : KEY,
         };
@@ -183,6 +264,14 @@ function createGateway(backendCookie) {
     if (parseCookies(req.headers.cookie).dshphone !== KEY) {
       res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(LOGIN_HTML(KEY));
+      return;
+    }
+
+    // ---- native JSON API for the iOS app (no WebSocket RPC, no browser) ----
+    if (u.pathname.startsWith('/native/')) {
+      handleNative(req, res, u).catch((e) => {
+        try { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e && e.message || e) })); } catch { }
+      });
       return;
     }
 

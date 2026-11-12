@@ -12,6 +12,7 @@ final class DiscoveryService: NSObject, ObservableObject {
     @Published private(set) var isScanning: Bool = false
     @Published private(set) var statusText: String = "就绪"
     @Published private(set) var localAddress: String?
+    @Published private(set) var diagnostics: String?
 
     private var browser: NWBrowser?
     private var services: [String: NetService] = [:]
@@ -20,16 +21,6 @@ final class DiscoveryService: NSObject, ObservableObject {
 
     private static let scanPorts = [80, 8080]
     private static let storeKey = "dsh.known.devices"
-
-    private let probeSession: URLSession = {
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 0.9
-        cfg.timeoutIntervalForResource = 1.5
-        cfg.waitsForConnectivity = false
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        cfg.httpMaximumConnectionsPerHost = 2
-        return URLSession(configuration: cfg)
-    }()
 
     override init() {
         super.init()
@@ -43,7 +34,8 @@ final class DiscoveryService: NSObject, ObservableObject {
 
     func start() {
         localAddress = Self.currentIPv4()
-        statusText = "本机 \(localAddress ?? "?")，正在发现…"
+        statusText = "本机 \(localAddress ?? "无 Wi-Fi")，正在发现…"
+        diagnostics = nil
         startBonjour()
         rescan()
     }
@@ -59,18 +51,16 @@ final class DiscoveryService: NSObject, ObservableObject {
 
     func rescan() {
         sweepTask?.cancel()
-        sweepTask = Task { [weak self] in
-            await self?.sweep()
-        }
+        sweepTask = Task { [weak self] in await self?.sweep() }
     }
 
     // MARK: - manual add
 
     func addManual(host: String, port: Int, key: String) {
-        let d = DshDevice(host: host, port: port, name: "手动 · \(host)", key: key.isEmpty ? nil : key)
-        merge(d)
-        statusText = "已添加手动地址"
+        merge(DshDevice(host: host, port: port, name: "手动 · \(host)", key: key.isEmpty ? nil : key))
     }
+
+    func remember(_ device: DshDevice) { merge(device) }
 
     func forget(_ device: DshDevice) {
         devices.removeAll { $0.id == device.id }
@@ -87,14 +77,12 @@ final class DiscoveryService: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if case .failed(let err) = state {
-                    self.statusText = "Bonjour 不可用：\(err.localizedDescription)"
+                    self.diagnostics = "Bonjour 不可用：\(err.localizedDescription)"
                 }
             }
         }
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            Task { @MainActor in
-                self?.absorbBonjour(results)
-            }
+            Task { @MainActor in self?.absorbBonjour(results) }
         }
         browser.start(queue: .main)
         self.browser = browser
@@ -117,18 +105,24 @@ final class DiscoveryService: NSObject, ObservableObject {
 
     private func bonjourResolved(name: String, host: String, port: Int, txt: [String: Data]) {
         var key: String?
-        if let raw = txt["key"], let s = String(data: raw, encoding: .utf8), !s.isEmpty {
-            key = s
-        }
+        if let raw = txt["key"], let s = String(data: raw, encoding: .utf8), !s.isEmpty { key = s }
         let label = String(data: txt["name"] ?? Data(), encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 } ?? name
         merge(DshDevice(host: host, port: port, name: label, key: key))
     }
 
     // MARK: - sweep
 
+    private struct ProbeOutcome {
+        var device: DshDevice?
+        var timeout: Bool = false
+        var refused: Bool = false
+        var other: String?
+    }
+
     private func sweep() async {
         guard let ip = localAddress ?? Self.currentIPv4() else {
-            statusText = "拿不到本机 IP（Wi-Fi 是否已连接？）"
+            statusText = "没有 Wi-Fi 地址"
+            diagnostics = "设备没有拿到 IPv4，先连上 Wi-Fi。"
             return
         }
         localAddress = ip
@@ -138,64 +132,100 @@ final class DiscoveryService: NSObject, ObservableObject {
 
         isScanning = true
         statusText = "扫描 \(prefix).0/24 …"
+        diagnostics = nil
 
-        let found = await Self.probeAll(prefix: prefix, ports: Self.scanPorts, maxConcurrent: 64)
+        let outcome = await Self.probeAll(prefix: prefix, ports: Self.scanPorts, maxConcurrent: 64)
 
         isScanning = false
         guard !Task.isCancelled else { return }
-        for device in found { merge(device) }
-        statusText = found.isEmpty
-            ? "没扫到 dsh 网关（已有 \(devices.count) 个已知）"
+        for device in outcome.found { merge(device) }
+
+        statusText = outcome.found.isEmpty
+            ? "没扫到网关（已有 \(devices.count) 个已知）"
             : "扫描完成，共 \(devices.count) 个设备"
+
+        if outcome.found.isEmpty {
+            var lines = [
+                "本机 \(ip)，已探测 \(outcome.total) 个地址",
+                "超时 \(outcome.timeout) · 拒绝 \(outcome.refused)",
+            ]
+            if outcome.total > 0 && outcome.found.isEmpty && outcome.refused == 0 {
+                lines.append("全部超时通常是「本地网络」权限被关：设置 → DSHPhone → 本地网络，打开后回到 App 重新扫描。")
+            }
+            if let err = outcome.lastError { lines.append("最后错误：\(err)") }
+            diagnostics = lines.joined(separator: "\n")
+        }
         persist()
     }
 
-    /// Parallel /24 sweep. Pure `nonisolated` so it never touches the main actor.
+    private struct SweepResult {
+        var found: [DshDevice] = []
+        var total = 0
+        var timeout = 0
+        var refused = 0
+        var lastError: String?
+    }
+
     private nonisolated static func probeAll(prefix: String,
                                              ports: [Int],
-                                             maxConcurrent: Int) async -> [DshDevice] {
+                                             maxConcurrent: Int) async -> SweepResult {
         var queue: [(String, Int)] = []
         queue.reserveCapacity(254 * ports.count)
-        // gateway address first: it is by far the most likely host
         for port in ports { queue.append(("\(prefix).1", port)) }
         for last in 2...254 {
             for port in ports { queue.append(("\(prefix).\(last)", port)) }
         }
 
-        var results: [DshDevice] = []
+        var result = SweepResult()
         var iterator = queue.makeIterator()
 
-        await withTaskGroup(of: DshDevice?.self) { group in
+        await withTaskGroup(of: ProbeOutcome.self) { group in
             for _ in 0..<maxConcurrent {
                 guard let job = iterator.next() else { break }
                 group.addTask { await probe(host: job.0, port: job.1) }
             }
-            while let result = await group.next() {
-                if let device = result { results.append(device) }
+            while let outcome = await group.next() {
+                result.total += 1
+                if let device = outcome.device { result.found.append(device) }
+                else if outcome.timeout { result.timeout += 1 }
+                else if outcome.refused { result.refused += 1 }
+                if let e = outcome.other { result.lastError = e }
                 if Task.isCancelled { group.cancelAll(); break }
                 if let job = iterator.next() {
                     group.addTask { await probe(host: job.0, port: job.1) }
                 }
             }
         }
-        return results
+        return result
     }
 
-    private nonisolated static func probe(host: String, port: Int) async -> DshDevice? {
-        guard let url = URL(string: "http://\(host):\(port)/__ping?fmt=json") else { return nil }
+    private nonisolated static func probe(host: String, port: Int) async -> ProbeOutcome {
+        guard let url = URL(string: "http://\(host):\(port)/__ping?fmt=json") else { return ProbeOutcome() }
         var req = URLRequest(url: url)
         req.timeoutInterval = 0.9
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("dsh-ios", forHTTPHeaderField: "User-Agent")
         do {
             let (data, resp) = try await sharedProbeSession.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+                return ProbeOutcome(refused: true)
+            }
             let info = try? JSONDecoder().decode(PingInfo.self, from: data)
-            guard info?.service == "dsh-phone-gateway" else { return nil }
+            guard info?.service == "dsh-phone-gateway" else { return ProbeOutcome(refused: true) }
             let label = info?.name ?? "dsh @\(host)"
-            return DshDevice(host: host, port: port, name: label, key: info?.key)
+            return ProbeOutcome(device: DshDevice(host: host, port: port, name: label, key: info?.key))
         } catch {
-            return nil
+            let ns = error as NSError
+            switch ns.code {
+            case NSURLErrorTimedOut:
+                return ProbeOutcome(timeout: true)
+            case NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost:
+                return ProbeOutcome(refused: true)
+            case NSURLErrorNotConnectedToInternet, NSURLErrorCannotFindHost:
+                return ProbeOutcome(other: "NSURLError \(ns.code)（本地网络权限或 Wi-Fi）")
+            default:
+                return ProbeOutcome(other: ns.localizedDescription)
+            }
         }
     }
 
@@ -214,7 +244,6 @@ final class DiscoveryService: NSObject, ObservableObject {
     private func merge(_ device: DshDevice) {
         if let idx = devices.firstIndex(where: { $0.id == device.id }) {
             let old = devices[idx]
-            // keep a user-supplied key if the probe had none
             devices[idx] = DshDevice(
                 host: device.host,
                 port: device.port,
