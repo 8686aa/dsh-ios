@@ -1,0 +1,72 @@
+name: build-unsigned-ipa
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ipa:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build unsigned .app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DSHPhone.xcodeproj \
+            -scheme DSHPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            ENABLE_BITCODE=NO \
+            build
+
+      - name: Package Payload/*.ipa
+        run: |
+          APP="build/Build/Products/Release-iphoneos/DSHPhone.app"
+          test -d "$APP" || { echo "app not found"; exit 1; }
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry "DSHPhone-unsigned.ipa" Payload
+          ls -lh DSHPhone-unsigned.ipa
+          shasum -a 256 DSHPhone-unsigned.ipa | tee DSHPhone-unsigned.ipa.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DSHPhone-unsigned-ipa
+          path: |
+            out/DSHPhone-unsigned.ipa
+            out/DSHPhone-unsigned.ipa.sha256
+          if-no-files-found: error
+
+      - name: Attach to release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/DSHPhone-unsigned.ipa
+            out/DSHPhone-unsigned.ipa.sha256
+          generate_release_notes: true
