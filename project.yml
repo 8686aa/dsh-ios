@@ -1,4 +1,4 @@
-﻿name: DSHPhone
+name: DSHPhone
 options:
   bundleIdPrefix: com.dsh.phone
   createIntermediateGroups: true
@@ -55,7 +55,7 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSLocalNetworkUsageDescription: "鐢ㄤ簬鍦ㄥ悓涓€鍊?Wi-Fi 涓嬪彂鐜板苟杩炴帴浣犵數鑴戜笂鐨?dsh 缃戝叧銆?
+        NSLocalNetworkUsageDescription: "Discover and connect to the dsh gateway running on your computer over the local network."
         NSBonjourServices:
           - "_dsh._tcp"
           - "_dsh._tcp."
@@ -63,4 +63,3 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
-
