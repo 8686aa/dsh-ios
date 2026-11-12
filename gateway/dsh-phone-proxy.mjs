@@ -18,8 +18,14 @@ import { spawn, execSync } from 'node:child_process';
 import { startMdns } from './mdns-announce.mjs';
 
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-const DSH_BIN = process.env.DSH_BIN ||
-  'C:\\Users\\Administrator\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
+
+function defaultDshBin() {
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  return path.join(local, 'Programs', 'DeepSeek Harness', 'resources', 'app', 'dsh',
+    'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+}
+
+const DSH_BIN = process.env.DSH_BIN || defaultDshBin();
 const PROFILE_DIR = path.join(DSH_HOME, 'profiles', 'web');
 const BACK_HOST = '127.0.0.1';
 const BACK_PORT = Number(process.env.DSH_BACK_PORT || 20202);
