@@ -41,8 +41,8 @@ targets:
       path: DSHPhone/Info.plist
       properties:
         CFBundleDisplayName: dsh
-        CFBundleShortVersionString: "1.1.1"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "1.1.2"
+        CFBundleVersion: "4"
         UILaunchScreen:
           UIColorName: ""
         UIRequiresFullScreen: false
@@ -66,4 +66,5 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         ITSAppUsesNonExemptEncryption: false
+
 

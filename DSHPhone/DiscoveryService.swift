@@ -134,6 +134,13 @@ final class DiscoveryService: NSObject, ObservableObject {
         statusText = "扫描 \(prefix).0/24 …"
         diagnostics = nil
 
+        // 1) Probe every remembered gateway first. This succeeds even when the
+        //    phone sits in another subnet, as long as the router routes between them.
+        for known in devices {
+            let knownOutcome = await Self.probe(host: known.host, port: known.port)
+            if let found = knownOutcome.device { merge(found) }
+        }
+
         let outcome = await Self.probeAll(prefix: prefix, ports: Self.scanPorts, maxConcurrent: 64)
 
         isScanning = false
@@ -149,7 +156,12 @@ final class DiscoveryService: NSObject, ObservableObject {
                 "本机 \(ip)，已探测 \(outcome.total) 个地址",
                 "超时 \(outcome.timeout) · 拒绝 \(outcome.refused)",
             ]
-            if outcome.total > 0 && outcome.found.isEmpty && outcome.refused == 0 {
+            let knownPrefixes = Set(devices.map {
+                $0.host.split(separator: ".").prefix(3).joined(separator: ".")
+            })
+            if !knownPrefixes.isEmpty && !knownPrefixes.contains(prefix) {
+                lines.append("已知网关在 \(knownPrefixes.sorted().joined(separator: " / ")) 网段，本机在 \(prefix) 网段 —— 不在同一个局域网，先把手机连到和电脑相同的 Wi-Fi。")
+            } else if outcome.total > 0 && outcome.refused == 0 {
                 lines.append("全部超时通常是「本地网络」权限被关：设置 → DSHPhone → 本地网络，打开后回到 App 重新扫描。")
             }
             if let err = outcome.lastError { lines.append("最后错误：\(err)") }
